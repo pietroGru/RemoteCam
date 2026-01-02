@@ -27,11 +27,12 @@ import com.samsung.android.scan3d.util.Selector
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.parcelize.Parcelize
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
-import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicInteger
+
 class CamEngine(val context: Context) {
 
     var http: HttpService? = null
@@ -50,6 +51,17 @@ class CamEngine(val context: Context) {
     val camOutPutFormat = ImageFormat.JPEG // ImageFormat.YUV_420_888// ImageFormat.JPEG
 
     val executor = Executors.newSingleThreadExecutor()
+
+    private var takePicture: ((ByteArray) -> Unit)? = null
+
+    fun takePicture(callback: (ByteArray) -> Unit) {
+        takePicture = callback
+    }
+
+    fun toggleTorch() {
+        viewState.flash = !viewState.flash
+        updateFlash()
+    }
 
     fun getEncoder(mimeType: String, resW: Int, resH: Int): MediaCodec? {
         fun selectCodec(mimeType: String, needEncoder: Boolean): MediaCodecInfo? {
@@ -88,7 +100,8 @@ class CamEngine(val context: Context) {
         stream = false,
         cameraId = "0",
         quality = 80,
-        resolutionIndex = null
+        resolutionIndex = null,
+        flash = false
     )
 
     /** [CameraCharacteristics] corresponding to the provided Camera ID */
@@ -183,6 +196,95 @@ class CamEngine(val context: Context) {
         }, handler)
     }
 
+    private var lastTime = 0L
+    private var kodd = 0
+    private var aquired = AtomicInteger(0)
+
+    private val repeatingCaptureCallback = object : CameraCaptureSession.CaptureCallback() {
+
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult
+        ) {
+            super.onCaptureCompleted(session, request, result)
+
+
+            var lastImg = imageReader.acquireNextImage()
+
+            if (aquired.get() > 1 && lastImg != null) {
+                lastImg.close()
+                Log.i("COM", "EARLY CLOSE")
+                lastImg = null
+            }
+
+            val img = lastImg ?: return
+            aquired.incrementAndGet()
+            var curTime = System.currentTimeMillis()
+            val delta = curTime - lastTime
+            lastTime = curTime
+            kodd += 1
+
+            if (camOutPutFormat == ImageFormat.JPEG) {
+                // executor.execute(Runnable {
+                val buffer = img.planes[0].buffer
+                val bytes = ByteArray(buffer.remaining()).apply { buffer.get(this) }
+
+                takePicture?.let {
+                    it(bytes)
+                    takePicture = null
+                }
+
+                if (kodd % 10 == 0) {
+                    updateViewQuick(
+                        DataQuick(
+                            delta.toInt(),
+                            (30 * bytes.size / 1000)
+                        )
+                    )
+                }
+
+                img.close()
+                aquired.decrementAndGet()
+                if (viewState.stream) {
+
+                    http?.channel?.trySend(
+                        bytes
+                    )
+
+                }
+
+            }
+        }
+    }
+
+    fun updateFlash() {
+        if (session == null) {
+            return
+        }
+        try {
+            val captureRequestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+
+            val showLiveSurface = viewState.preview && !insidePause && previewSurface != null
+            if (showLiveSurface) {
+                captureRequestBuilder.addTarget(previewSurface!!)
+            }
+            captureRequestBuilder.addTarget(imageReader.surface)
+            captureRequestBuilder.set(CaptureRequest.JPEG_QUALITY, viewState.quality.toByte())
+
+            if (characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true) {
+                if (viewState.flash) {
+                    captureRequestBuilder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                } else {
+                    captureRequestBuilder.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                }
+            }
+            session!!.setRepeatingRequest(captureRequestBuilder.build(), repeatingCaptureCallback, cameraHandler)
+        } catch (e: Exception) {
+            Log.e("CamEngine", "Failed to update flash", e)
+        }
+    }
+
     suspend fun initializeCamera() {
         Log.i("CAMERA", "initializeCamera")
 
@@ -232,65 +334,21 @@ class CamEngine(val context: Context) {
         }
         captureRequest.addTarget(imageReader.surface)
         captureRequest.set(CaptureRequest.JPEG_QUALITY, viewState.quality.toByte())
-        var lastTime = System.currentTimeMillis()
+        if (characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true) {
+            if (viewState.flash) {
+                captureRequest.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+            } else {
+                captureRequest.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+            }
+        }
 
+        lastTime = System.currentTimeMillis()
+        kodd = 0
+        aquired.set(0)
 
-        var kodd = 0
-        var aquired = AtomicInteger(0)
         session!!.setRepeatingRequest(
             captureRequest.build(),
-            object : CameraCaptureSession.CaptureCallback() {
-
-                override fun onCaptureCompleted(
-                    session: CameraCaptureSession,
-                    request: CaptureRequest,
-                    result: TotalCaptureResult
-                ) {
-                    super.onCaptureCompleted(session, request, result)
-
-
-                    var lastImg = imageReader.acquireNextImage()
-
-                    if (aquired.get() > 1 && lastImg != null) {
-                        lastImg.close()
-                        Log.i("COM", "EARLY CLOSE")
-                        lastImg = null
-                    }
-
-                    val img = lastImg ?: return
-                    aquired.incrementAndGet()
-                    var curTime = System.currentTimeMillis()
-                    val delta = curTime - lastTime
-                    lastTime = curTime
-                    kodd += 1
-
-                    if (camOutPutFormat == ImageFormat.JPEG) {
-                        // executor.execute(Runnable {
-                        val buffer = img.planes[0].buffer
-                        val bytes = ByteArray(buffer.remaining()).apply { buffer.get(this) }
-
-                        if (kodd % 10 == 0) {
-                            updateViewQuick(
-                                DataQuick(
-                                    delta.toInt(),
-                                    (30 * bytes.size / 1000)
-                                )
-                            )
-                        }
-
-                        img.close()
-                        aquired.decrementAndGet()
-                        if (viewState.stream) {
-
-                            http?.channel?.trySend(
-                                bytes
-                            )
-
-                        }
-
-                    }
-                }
-            },
+            repeatingCaptureCallback,
             cameraHandler
         )
         updateView()

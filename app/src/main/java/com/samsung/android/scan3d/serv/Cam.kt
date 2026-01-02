@@ -17,6 +17,9 @@ import com.samsung.android.scan3d.CameraActivity
 import com.samsung.android.scan3d.R
 import com.samsung.android.scan3d.fragments.CameraFragment
 import com.samsung.android.scan3d.http.HttpService
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.channels.consumeEach
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 
 
@@ -77,6 +80,23 @@ class Cam : Service() {
 
                 http = HttpService()
                 http?.main()
+                GlobalScope.launch {
+                    http?.actionChannel?.consumeEach { action ->
+                        when (action.first) {
+                            "torch" -> {
+                                engine?.toggleTorch()
+                                action.second.send(null)
+                            }
+                            "screenshot" -> {
+                                engine?.takePicture { jpeg ->
+                                    runBlocking {
+                                        action.second.send(jpeg)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
             }
 
@@ -104,10 +124,16 @@ class Cam : Service() {
                 val new : CameraFragment.Companion.ViewState = intent.extras?.getParcelable("data")!!
                 Log.i("CAM", "new_view_state: " + new)
                 Log.i("CAM", "from:           " + old)
+                val oldFlash = old.flash
                 engine?.viewState =  new
                 if (old != new) {
-                    Log.i("CAM", "diff")
-                    engine?.restart()
+                    if (old.copy(flash = new.flash) == new) {
+                        Log.i("CAM", "diff is only flash")
+                        engine?.updateFlash()
+                    } else {
+                        Log.i("CAM", "diff is other than flash")
+                        engine?.restart()
+                    }
                 }
             }
 

@@ -63,7 +63,7 @@ class CameraFragment : Fragment() {
     var resH = 720
 
     var viewState =
-        ViewState(true, stream = false, cameraId = "0", quality = 80, resolutionIndex = null)
+        ViewState(true, stream = false, cameraId = "0", quality = 80, resolutionIndex = null, flash = false)
 
     lateinit var Cac: CameraActivity
 
@@ -132,6 +132,13 @@ class CameraFragment : Fragment() {
                 CompoundButton.OnCheckedChangeListener {
                 override fun onCheckedChanged(p0: CompoundButton?, p1: Boolean) {
                     viewState.stream = p1
+                    sendViewState()
+                }
+            })
+            fragmentCameraBinding.switchFlash?.setOnCheckedChangeListener(object :
+                CompoundButton.OnCheckedChangeListener {
+                override fun onCheckedChanged(p0: CompoundButton?, p1: Boolean) {
+                    viewState.flash = p1
                     sendViewState()
                 }
             })
@@ -336,7 +343,8 @@ class CameraFragment : Fragment() {
             var stream: Boolean,
             var cameraId: String,
             var resolutionIndex: Int?,
-            var quality: Int
+            var quality: Int,
+            var flash: Boolean
         ) : Parcelable
 
     }
